@@ -13,7 +13,7 @@ import sys
 # KONFIGURASI GOOGLE SHEETS
 # ==========================================
 SCOPE = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-CREDENTIALS_FILE = "credentials.json"  # Pastikan file JSON ada di folder yang sama
+CREDENTIALS_FILE = "credentials.json"
 SPREADSHEET_ID = ""
 
 SHEET_NAME_ABSEN = "Sheet Absensi Only (Test)"
@@ -25,6 +25,7 @@ SHEET_NAME_KUPON = "Sheet Kupon Streamer"
 # KONFIGURASI BOT DISCORD
 # ==========================================
 TOKEN = ''
+
 DEDICATED_CHANNEL_ID_ABSEN =   # Ganti ID Channel Absen
 DEDICATED_CHANNEL_ID_REWARD =  # Ganti ID Channel Reward
 DEDICATED_CHANNEL_ID_KUPON =   # Ganti ID Channel Kupon
@@ -309,32 +310,28 @@ async def scan_kupon_streamer():
 # ==========================================
 async def scan_custom_channel():
     tz = pytz.timezone('Asia/Jakarta')
-    print(f"\n[{datetime.now(tz).strftime('%H:%M:%S')}] --- [FITUR 4] SCANNING CUSTOM CHANNEL ---")
-    
+    print(f"\n[{datetime.now(tz).strftime('%H:%M:%S')}] --- [FITUR 4] SCANNING CUSTOM CHANNEL (OPTIMIZED) ---")
+
     channel = client.get_channel(int(CUSTOM_CHANNEL_ID))
     if not channel:
         print(f"Error: Channel Custom dengan ID {CUSTOM_CHANNEL_ID} tidak ditemukan!")
         return
-        
+
     try:
         gc = connect_gsheet_client()
         spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-        
+
         target_sheet_name = CUSTOM_SHEET_NAME
         try:
-            # Skenario 1 & 2: Sheet ditemukan
             sheet = spreadsheet.worksheet(target_sheet_name)
             headers = sheet.row_values(1)
-            
-            # Normalisasi length header untuk mencegah IndexError
+
             while len(headers) < 3:
                 headers.append("")
-                
+
             if headers[0] == 'ID Discord' and headers[1] == 'Display Name' and headers[2] == 'Isi Chat':
-                # Skenario 1: Sheet ditemukan & format sesuai
                 print(f"-> Sheet '{target_sheet_name}' ditemukan dan format valid. Bot akan mengupdate data.")
             else:
-                # Skenario 2: Sheet ditemukan TAPI format berbeda
                 target_sheet_name = f"{CUSTOM_SHEET_NAME} (BOT)"
                 print(f"-> Format header berbeda! Bot beralih ke sheet: '{target_sheet_name}'")
                 try:
@@ -344,78 +341,88 @@ async def scan_custom_channel():
                     print(f"-> Membuat sheet baru '{target_sheet_name}' beserta format warnanya...")
                     sheet = spreadsheet.add_worksheet(title=target_sheet_name, rows=1000, cols=10)
                     apply_custom_sheet_formatting(sheet)
-                    
+
         except WorksheetNotFound:
-            # Skenario 3: Sheet belum ada sama sekali
             print(f"-> Sheet '{target_sheet_name}' tidak ditemukan. Bot membuat sheet baru...")
             sheet = spreadsheet.add_worksheet(title=target_sheet_name, rows=1000, cols=10)
             apply_custom_sheet_formatting(sheet)
 
+        # 1. Ambil seluruh data sheet sekaligus ke memori lokal
         all_values = sheet.get_all_values()
-        col_a_values = [str(row[0]).strip() if len(row) > 0 else "" for row in all_values]
-        
+
+        # Pastikan minimal ada baris header
+        if not all_values:
+            apply_custom_sheet_formatting(sheet)
+            all_values = sheet.get_all_values()
+
+        # Mapping Discord ID ke indeks baris (0-indexed dalam list)
+        # Baris 0 adalah Header ('ID Discord', 'Display Name', 'Isi Chat')
+        col_a_map = {}
+        for idx, row in enumerate(all_values):
+            if idx == 0: continue  # Skip header
+            id_val = str(row[0]).strip() if len(row) > 0 else ""
+            if id_val:
+                col_a_map[id_val] = idx
+
         print("-> Menarik riwayat chat dari Discord (Mohon tunggu)...")
         messages = [msg async for msg in channel.history(limit=2000)]
         messages.reverse()
         print(f"-> Berhasil menarik {len(messages)} pesan. Mulai mencocokkan data...")
-        
+
         added_users = 0
         recorded_chats = 0
-        
+        is_dirty = False  # Penanda jika ada perubahan data
+
+        # 2. Proses pesan secara in-memory
         for msg in messages:
-            if msg.author == client.user or not msg.content.strip(): continue
-            
+            if msg.author == client.user or not msg.content.strip():
+                continue
+
             author_id = str(msg.author.name)
             author_name = str(msg.author.display_name)
-            if not author_name or author_name.strip() == "": author_name = "<username_manual>"
-                
+            if not author_name or author_name.strip() == "":
+                author_name = "<username_manual>"
+
             waktu_pesan_wib = msg.created_at.astimezone(tz)
-            
-            if author_id not in col_a_values:
+
+            if author_id not in col_a_map:
+                # User baru: Tambahkan baris baru di memori
                 chat_awal = format_append_chat_with_date("", msg.content, waktu_pesan_wib)
-                
-                try: new_row_number = col_a_values.index("") + 1
-                except ValueError: new_row_number = len(col_a_values) + 1
-                
-                # Proteksi agar tidak menimpa baris ke-1 (Header) jika sheet kosong melompong
-                if new_row_number == 1: new_row_number = 2
-                
-                try:
-                    sheet.update_cell(new_row_number, 1, author_id)
-                    sheet.update_cell(new_row_number, 2, author_name)
-                    sheet.update_cell(new_row_number, 3, chat_awal)
-                    
-                    while len(all_values) < new_row_number: all_values.append([])
-                    while len(all_values[new_row_number - 1]) < 3: all_values[new_row_number - 1].append("")
-                        
-                    all_values[new_row_number - 1][0] = author_id
-                    all_values[new_row_number - 1][1] = author_name
-                    all_values[new_row_number - 1][2] = chat_awal
-                    
-                    col_a_values = [str(row[0]).strip() if len(row) > 0 else "" for row in all_values]
-                    added_users += 1
-                    recorded_chats += 1
-                    await asyncio.sleep(2.0)
-                except Exception as e:
-                    print(f"[!] Gagal menambah user {author_id}: {e}")
-                    await asyncio.sleep(5.0)
-                continue
-            
-            row_target = col_a_values.index(author_id) + 1
-            while len(all_values[row_target - 1]) < 3: all_values[row_target - 1].append("")
-                
-            current_chat = all_values[row_target - 1][2]
-            if is_chat_recorded_with_date(current_chat, msg.content): continue
-            
-            updated_chat = format_append_chat_with_date(current_chat, msg.content, waktu_pesan_wib)
-            try:
-                sheet.update_cell(row_target, 3, updated_chat)
-                all_values[row_target - 1][2] = updated_chat
+                new_row = [author_id, author_name, chat_awal]
+
+                all_values.append(new_row)
+                col_a_map[author_id] = len(all_values) - 1
+
+                added_users += 1
                 recorded_chats += 1
-                await asyncio.sleep(2.0)
-            except Exception as e:
-                print(f"[!] Gagal merekam chat {author_id}: {e}")
-                await asyncio.sleep(5.0)
+                is_dirty = True
+            else:
+                # User lama: Update chat di memori jika belum terekam
+                row_idx = col_a_map[author_id]
+
+                # Pastikan panjang elemen array minimal 3
+                while len(all_values[row_idx]) < 3:
+                    all_values[row_idx].append("")
+
+                current_chat = all_values[row_idx][2]
+                if is_chat_recorded_with_date(current_chat, msg.content):
+                    continue
+
+                updated_chat = format_append_chat_with_date(current_chat, msg.content, waktu_pesan_wib)
+                all_values[row_idx][2] = updated_chat
+                recorded_chats += 1
+                is_dirty = True
+
+        # 3. Kirim update sekaligus ke Google Sheets dalam 1 request jika ada perubahan
+        if is_dirty:
+            print("-> Mengunggah perubahan ke Google Sheets...")
+            sheet.update(range_name=f'A1:C{len(all_values)}', values=all_values)
+            print(f"-> Selesai! User Baru: {added_users} | Chat Direkam: {recorded_chats}")
+        else:
+            print("-> Selesai! Tidak ada data/chat baru yang perlu diupdate (Sudah sinkron).")
+
+    except Exception as e:
+        print(f"Error Fatal di Fitur Custom: {e}")
                 
         print(f"-> Selesai! User Baru: {added_users} | Chat Direkam: {recorded_chats}")
     except Exception as e:
